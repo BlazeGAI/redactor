@@ -149,6 +149,14 @@ class DocumentRedactor:
             
             return output_zip_path
 
+def get_mime_type(filename):
+    """Helper function to get MIME type based on file extension"""
+    if filename.endswith('.docx'):
+        return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    elif filename.endswith('.pptx'):
+        return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+    return 'application/octet-stream'
+
 def main():
     st.title("📄 Document Author Redactor")
     
@@ -224,7 +232,7 @@ def main():
                 # Redact author
                 try:
                     redactor.redact_author(temp_file_path)
-                    output_files.append((output_filename, temp_file_path))
+                    output_files.append((output_filename, temp_file_path, file_extension))
                 except Exception as e:
                     st.error(f"Error processing {uploaded_file.name}: {e}")
             
@@ -234,7 +242,7 @@ def main():
                 if len(output_files) > 1:
                     output_zip_path = os.path.join(tempfile.gettempdir(), 'redacted_documents.zip')
                     with zipfile.ZipFile(output_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                        for filename, filepath in output_files:
+                        for filename, filepath, _ in output_files:
                             zipf.write(filepath, arcname=filename)
                     
                     # Read the entire zip file content
@@ -251,19 +259,20 @@ def main():
                 
                 # Single file download
                 else:
-                    filename, filepath = output_files[0]
+                    filename, filepath, file_extension = output_files[0]
                     
                     # Read the entire file content
                     with open(filepath, "rb") as file:
                         file_bytes = file.read()
                     
+                    # Get correct MIME type
+                    mime_type = get_mime_type(filename)
+                    
                     st.download_button(
                         label="Download Redacted Document",
                         data=file_bytes,
                         file_name=filename,
-                        mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document' 
-                             if filename.endswith('docx') 
-                             else 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+                        mime=mime_type
                     )
                 
                 st.success("Documents successfully redacted!")
