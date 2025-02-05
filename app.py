@@ -2,24 +2,23 @@ import streamlit as st
 import os
 import logging
 import json
-import zipfile
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
 import spacy
 from docx import Document
 from pptx import Presentation
-from docx.opc.exceptions import PackageNotFoundError
 
 class Settings:
     def __init__(self):
         self.config_file = "redactor_settings.json"
         self.default_settings = {
             "redaction_text": "[REDACTED]",
-            "redact_author": True,
+            "entity_types": ["PERSON"],
             "preserve_case": True,
-            "backup_files": True
+            "backup_files": True,
+            "recent_files": [],
+            "max_recent_files": 5
         }
         self.load_settings()
     
@@ -79,86 +78,114 @@ class DocumentRedactor:
             st.error(f"Error loading NLP model: {e}")
             st.stop()
     
-    def redact_author(self, document_path):
-        """Redact document author metadata"""
+    def redact_names(self, text):
+        """Enhanced redaction with multiple entity types and case preservation"""
+        doc = self.nlp(text)
+        redacted_text = text
+        entities = []
+        
+        # Collect all entities to redact
+        selected_types = self.settings.get("entity_types")
+        for ent in doc.ents:
+            if ent.label_ in selected_types:
+                entities.append(ent.text)
+        
+        # Sort by length to avoid partial replacements
+        entities.sort(key=len, reverse=True)
+        
+        # Replace entities with redaction text
+        redaction_text = self.settings.get("redaction_text")
+        for entity in entities:
+            if self.settings.get("preserve_case"):
+                if entity.isupper():
+                    replacement = redaction_text.upper()
+                elif entity.istitle():
+                    replacement = redaction_text.title()
+                else:
+                    replacement = redaction_text
+            else:
+                replacement = redaction_text
+            
+            redacted_text = redacted_text.replace(entity, replacement)
+        
+        return redacted_text
+    
+    def process_word_document(self, input_file, output_path):
+        """Process Word document with redaction"""
         try:
-            # Word document author redaction
-            if document_path.endswith('.docx'):
-                doc = Document(document_path)
-                core_properties = doc.core_properties
-                
-                # Redact author
-                if core_properties.author:
-                    logging.info(f"Redacting author: {core_properties.author}")
-                    core_properties.author = self.settings.get("redaction_text")
-                
-                # Save the modified document
-                doc.save(document_path)
+            # Create backup if enabled
+            if self.settings.get("backup_files"):
+                backup_path = f"{input_file.name}.backup"
+                with open(backup_path, "wb") as backup_file:
+                    backup_file.write(input_file.getvalue())
+                logging.info(f"Created backup: {backup_path}")
             
-            # PowerPoint document author redaction
-            elif document_path.endswith('.pptx'):
-                prs = Presentation(document_path)
-                
-                # Unfortunately, python-pptx doesn't have a straightforward 
-                # way to modify core properties, so we'll log the limitation
-                st.warning("PowerPoint author redaction is limited due to library constraints.")
+            # Read the document
+            doc = Document(input_file)
             
+            # Process paragraphs
+            for paragraph in doc.paragraphs:
+                original_text = paragraph.text
+                redacted_text = self.redact_names(original_text)
+                if original_text != redacted_text:
+                    logging.info(f"Redacted paragraph: {original_text} -> {redacted_text}")
+                paragraph.text = redacted_text
+            
+            # Process tables
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        original_text = cell.text
+                        redacted_text = self.redact_names(original_text)
+                        if original_text != redacted_text:
+                            logging.info(f"Redacted table cell: {original_text} -> {redacted_text}")
+                        cell.text = redacted_text
+            
+            # Save the redacted document
+            doc.save(output_path)
+            logging.info(f"Successfully processed: {input_file.name}")
             return True
-        except PackageNotFoundError:
-            st.error(f"Invalid document: {document_path}")
-            return False
+        
         except Exception as e:
-            st.error(f"Error redacting author in {document_path}: {str(e)}")
+            logging.error(f"Error processing {input_file.name}: {str(e)}")
+            st.error(f"Error processing document: {str(e)}")
             return False
     
-    def process_zip(self, uploaded_zip):
-        """Process a zip file of documents"""
-        # Create temporary directories
-        with tempfile.TemporaryDirectory() as input_dir, tempfile.TemporaryDirectory() as output_dir:
-            # Extract uploaded zip
-            with zipfile.ZipFile(uploaded_zip, 'r') as zip_ref:
-                zip_ref.extractall(input_dir)
+    def process_powerpoint(self, input_file, output_path):
+        """Process PowerPoint document with redaction"""
+        try:
+            # Create backup if enabled
+            if self.settings.get("backup_files"):
+                backup_path = f"{input_file.name}.backup"
+                with open(backup_path, "wb") as backup_file:
+                    backup_file.write(input_file.getvalue())
+                logging.info(f"Created backup: {backup_path}")
             
-            # Track processed files
-            processed_files = []
+            # Read the presentation
+            prs = Presentation(input_file)
             
-            # Recursively process files
-            for root, _, files in os.walk(input_dir):
-                for file in files:
-                    if file.endswith(('.docx', '.pptx')):
-                        input_path = os.path.join(root, file)
-                        output_path = os.path.join(output_dir, file)
-                        
-                        # Ensure output directory structure
-                        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-                        
-                        # Copy the file for processing
-                        import shutil
-                        shutil.copy2(input_path, output_path)
-                        
-                        # Redact author
-                        if self.redact_author(output_path):
-                            processed_files.append(output_path)
+            # Process slides
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        original_text = shape.text
+                        redacted_text = self.redact_names(original_text)
+                        if original_text != redacted_text:
+                            logging.info(f"Redacted slide shape: {original_text} -> {redacted_text}")
+                        shape.text = redacted_text
             
-            # Create output zip
-            output_zip_path = os.path.join(tempfile.gettempdir(), 'redacted_documents.zip')
-            with zipfile.ZipFile(output_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for file in processed_files:
-                    arcname = os.path.relpath(file, output_dir)
-                    zipf.write(file, arcname=arcname)
-            
-            return output_zip_path
-
-def get_mime_type(filename):
-    """Helper function to get MIME type based on file extension"""
-    if filename.endswith('.docx'):
-        return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    elif filename.endswith('.pptx'):
-        return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
-    return 'application/octet-stream'
+            # Save the redacted presentation
+            prs.save(output_path)
+            logging.info(f"Successfully processed: {input_file.name}")
+            return True
+        
+        except Exception as e:
+            logging.error(f"Error processing {input_file.name}: {str(e)}")
+            st.error(f"Error processing document: {str(e)}")
+            return False
 
 def main():
-    st.title("📄 Document Author Redactor")
+    st.title("📄 Document Name Redactor")
     
     # Initialize redactor
     redactor = DocumentRedactor()
@@ -174,108 +201,93 @@ def main():
         )
         redactor.settings.set("redaction_text", redaction_text)
         
-        # Author redaction toggle (default on)
-        redact_author = st.checkbox(
-            "Redact Document Author", 
-            value=redactor.settings.get("redact_author"),
-            help="Remove author metadata from documents"
+        # Entity types
+        entity_types = st.multiselect(
+            "Entity Types to Redact", 
+            options=["PERSON", "ORG", "GPE", "DATE"],
+            default=redactor.settings.get("entity_types")
         )
-        redactor.settings.set("redact_author", redact_author)
+        redactor.settings.set("entity_types", entity_types)
+        
+        # Case preservation
+        preserve_case = st.checkbox(
+            "Preserve Case", 
+            value=redactor.settings.get("preserve_case")
+        )
+        redactor.settings.set("preserve_case", preserve_case)
+        
+        # Backup files
+        backup_files = st.checkbox(
+            "Create Backup Before Processing", 
+            value=redactor.settings.get("backup_files")
+        )
+        redactor.settings.set("backup_files", backup_files)
     
     # File upload
-    uploaded_files = st.file_uploader(
-        "Choose documents or a zip file", 
-        type=['docx', 'pptx', 'zip'],
-        accept_multiple_files=True
+    uploaded_file = st.file_uploader(
+        "Choose a document", 
+        type=['docx', 'pptx']
     )
     
-    if uploaded_files:
-        # Check if it's a single zip file
-        if len(uploaded_files) == 1 and uploaded_files[0].name.endswith('.zip'):
-            # Process zip file
-            if st.button("Redact Documents in Zip"):
-                try:
-                    output_zip_path = redactor.process_zip(uploaded_files[0])
-                    
-                    # Read the entire zip file content
-                    with open(output_zip_path, "rb") as file:
-                        zip_bytes = file.read()
-                    
-                    # Provide download for processed zip
-                    st.download_button(
-                        label="Download Redacted Documents",
-                        data=zip_bytes,
-                        file_name="redacted_documents.zip",
-                        mime='application/zip'
-                    )
-                    
-                    st.success("Documents in zip file successfully processed!")
-                
-                except Exception as e:
-                    st.error(f"Error processing zip file: {e}")
+    if uploaded_file is not None:
+        # Prepare output
+        file_extension = uploaded_file.name.split('.')[-1]
+        output_filename = uploaded_file.name.replace(f'.{file_extension}', '_redacted.{file_extension}')
         
-        # Process individual files
-        else:
-            # Prepare output directory
-            output_files = []
+        # Preview option
+        if st.button("Preview Redaction"):
+            try:
+                with st.expander("Redaction Preview"):
+                    if file_extension == 'docx':
+                        doc = Document(uploaded_file)
+                        preview_text = "\n\n".join([p.text for p in doc.paragraphs])
+                    else:  # pptx
+                        prs = Presentation(uploaded_file)
+                        preview_text = "\n\n".join([
+                            shape.text for slide in prs.slides 
+                            for shape in slide.shapes if hasattr(shape, "text")
+                        ])
+                    
+                    redacted_preview = redactor.redact_names(preview_text)
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.subheader("Original")
+                        st.text_area("Original Text", preview_text, height=300)
+                    with col2:
+                        st.subheader("Redacted")
+                        st.text_area("Redacted Text", redacted_preview, height=300)
             
-            for uploaded_file in uploaded_files:
-                # Prepare output filename
-                file_extension = uploaded_file.name.split('.')[-1]
-                output_filename = uploaded_file.name.replace(f'.{file_extension}', '_redacted.{file_extension}')
+            except Exception as e:
+                st.error(f"Error creating preview: {e}")
+        
+        # Process and download
+        if st.button("Redact Document"):
+            try:
+                # Process based on file type
+                if file_extension == 'docx':
+                    redactor.process_word_document(uploaded_file, output_filename)
+                else:  # pptx
+                    redactor.process_powerpoint(uploaded_file, output_filename)
                 
-                # Temporarily save the uploaded file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{file_extension}') as temp_file:
-                    temp_file.write(uploaded_file.getbuffer())
-                    temp_file_path = temp_file.name
-                
-                # Redact author
-                try:
-                    redactor.redact_author(temp_file_path)
-                    output_files.append((output_filename, temp_file_path, file_extension))
-                except Exception as e:
-                    st.error(f"Error processing {uploaded_file.name}: {e}")
-            
-            # Provide download for multiple files
-            if output_files:
-                # Create zip if multiple files
-                if len(output_files) > 1:
-                    output_zip_path = os.path.join(tempfile.gettempdir(), 'redacted_documents.zip')
-                    with zipfile.ZipFile(output_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                        for filename, filepath, _ in output_files:
-                            zipf.write(filepath, arcname=filename)
-                    
-                    # Read the entire zip file content
-                    with open(output_zip_path, "rb") as file:
-                        zip_bytes = file.read()
-                    
-                    # Download zip
-                    st.download_button(
-                        label="Download Redacted Documents",
-                        data=zip_bytes,
-                        file_name="redacted_documents.zip",
-                        mime='application/zip'
-                    )
-                
-                # Single file download
-                else:
-                    filename, filepath, file_extension = output_files[0]
-                    
-                    # Read the entire file content
-                    with open(filepath, "rb") as file:
-                        file_bytes = file.read()
-                    
-                    # Get correct MIME type
-                    mime_type = get_mime_type(filename)
-                    
+                # Provide download
+                with open(output_filename, "rb") as file:
                     st.download_button(
                         label="Download Redacted Document",
-                        data=file_bytes,
-                        file_name=filename,
-                        mime=mime_type
+                        data=file,
+                        file_name=output_filename,
+                        mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document' 
+                             if file_extension == 'docx' 
+                             else 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
                     )
                 
-                st.success("Documents successfully redacted!")
+                # Clean up
+                os.remove(output_filename)
+                
+                st.success("Document successfully redacted!")
+            
+            except Exception as e:
+                st.error(f"Error redacting document: {e}")
 
 if __name__ == "__main__":
     main()
