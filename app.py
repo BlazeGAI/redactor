@@ -189,14 +189,17 @@ def main():
                 try:
                     output_zip_path = redactor.process_zip(uploaded_files[0])
                     
-                    # Provide download for processed zip
+                    # Read the entire zip file content
                     with open(output_zip_path, "rb") as file:
-                        st.download_button(
-                            label="Download Redacted Documents",
-                            data=file,
-                            file_name="redacted_documents.zip",
-                            mime='application/zip'
-                        )
+                        zip_bytes = file.read()
+                    
+                    # Provide download for processed zip
+                    st.download_button(
+                        label="Download Redacted Documents",
+                        data=zip_bytes,
+                        file_name="redacted_documents.zip",
+                        mime='application/zip'
+                    )
                     
                     st.success("Documents in zip file successfully processed!")
                 
@@ -234,27 +237,34 @@ def main():
                         for filename, filepath in output_files:
                             zipf.write(filepath, arcname=filename)
                     
-                    # Download zip
+                    # Read the entire zip file content
                     with open(output_zip_path, "rb") as file:
-                        st.download_button(
-                            label="Download Redacted Documents",
-                            data=file,
-                            file_name="redacted_documents.zip",
-                            mime='application/zip'
-                        )
+                        zip_bytes = file.read()
+                    
+                    # Download zip
+                    st.download_button(
+                        label="Download Redacted Documents",
+                        data=zip_bytes,
+                        file_name="redacted_documents.zip",
+                        mime='application/zip'
+                    )
                 
                 # Single file download
                 else:
                     filename, filepath = output_files[0]
+                    
+                    # Read the entire file content
                     with open(filepath, "rb") as file:
-                        st.download_button(
-                            label="Download Redacted Document",
-                            data=file,
-                            file_name=filename,
-                            mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document' 
-                                 if filename.endswith('docx') 
-                                 else 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
-                        )
+                        file_bytes = file.read()
+                    
+                    st.download_button(
+                        label="Download Redacted Document",
+                        data=file_bytes,
+                        file_name=filename,
+                        mime='application/vnd.openxmlformats-officedocument.wordprocessingml.document' 
+                             if filename.endswith('docx') 
+                             else 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+                    )
                 
                 st.success("Documents successfully redacted!")
 
