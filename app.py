@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 import pandas as pd
 import spacy
+import re
 from docx import Document
 from pptx import Presentation
 from rapidfuzz import fuzz
@@ -99,12 +100,16 @@ class DocumentRedactor:
                 words = redacted_text.split()
                 for word in words:
                     if fuzz.ratio(word.lower(), name.lower()) >= threshold:
+                        pattern = word if not case_insensitive else re.compile(re.escape(word), re.IGNORECASE)
+                        replacement = self.apply_case(word, redaction_text) if preserve_case else redaction_text
+                        redacted_text = re.sub(pattern, replacement, redacted_text)
                         replacement = self.apply_case(word, redaction_text) if preserve_case else redaction_text
                         redacted_text = redacted_text.replace(word, replacement)
             else:
                 if name_to_check in text_to_check:
                     replacement = self.apply_case(name, redaction_text) if preserve_case else redaction_text
-                    redacted_text = redacted_text.replace(name, replacement)
+                    pattern = name if not case_insensitive else re.compile(re.escape(name), re.IGNORECASE)
+                    redacted_text = re.sub(pattern, replacement, redacted_text)
 
         return redacted_text
 
@@ -191,7 +196,7 @@ def main():
     if uploaded_file is not None:
         file_extension = uploaded_file.name.split('.')[-1]
         base_name = uploaded_file.name.rsplit('.', 1)[0]
-        output_filename = f"{base_name}.Redacted.{file_extension}"
+        output_filename = f"{base_name}-Redacted.{file_extension}"
 
         if st.button("Preview Redaction"):
             try:
