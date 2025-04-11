@@ -100,7 +100,8 @@ class DocumentRedactor:
                 if fuzz.ratio(text_to_check, name_to_check) >= threshold:
                     replacement = self.apply_case(name, redaction_text) if preserve_case else redaction_text
                     flags = re.IGNORECASE if case_insensitive else 0
-                    redacted_text = re.sub(rf'{re.escape(name)}', replacement, redacted_text, flags=flags)   else:
+                    redacted_text = re.sub(rf'{re.escape(name)}', replacement, redacted_text, flags=flags)   
+            else:
                 if name_to_check in text_to_check:
                     replacement = self.apply_case(name, redaction_text) if preserve_case else redaction_text
                     flags = re.IGNORECASE if case_insensitive else 0
