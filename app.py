@@ -71,7 +71,8 @@ class DocumentRedactor:
 
     def load_names_from_csv(self, csv_file):
         try:
-            df = pd.read_csv(csv_file)
+            import io
+            df = pd.read_csv(io.StringIO(csv_file.getvalue().decode('utf-8')))
             self.custom_names = df["Name"].dropna().astype(str).tolist()
             logging.info(f"Loaded {len(self.custom_names)} custom names for redaction.")
         except Exception as e:
