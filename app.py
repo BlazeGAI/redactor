@@ -105,7 +105,7 @@ class DocumentRedactor:
                 if name_to_check in text_to_check:
                     replacement = self.apply_case(name, redaction_text) if preserve_case else redaction_text
                     flags = re.IGNORECASE if case_insensitive else 0
-                                    redacted_text = re.sub(rf'\b{re.escape(name)}\b', replacement, redacted_text, flags=flags)
+                    redacted_text = re.sub(rf'\b{re.escape(name)}\b', replacement, redacted_text, flags=flags)
 
         return redacted_text
 
