@@ -103,8 +103,6 @@ class DocumentRedactor:
                         pattern = word if not case_insensitive else re.compile(re.escape(word), re.IGNORECASE)
                         replacement = self.apply_case(word, redaction_text) if preserve_case else redaction_text
                         redacted_text = re.sub(pattern, replacement, redacted_text)
-                        replacement = self.apply_case(word, redaction_text) if preserve_case else redaction_text
-                        redacted_text = redacted_text.replace(word, replacement)
             else:
                 if name_to_check in text_to_check:
                     replacement = self.apply_case(name, redaction_text) if preserve_case else redaction_text
