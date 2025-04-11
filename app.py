@@ -100,14 +100,14 @@ class DocumentRedactor:
                 words = redacted_text.split()
                 for word in words:
                     if fuzz.ratio(word.lower(), name.lower()) >= threshold:
-                        pattern = word if not case_insensitive else re.compile(re.escape(word), re.IGNORECASE)
                         replacement = self.apply_case(word, redaction_text) if preserve_case else redaction_text
-                        redacted_text = re.sub(pattern, replacement, redacted_text)
+                        flags = re.IGNORECASE if case_insensitive else 0
+                        redacted_text = re.sub(rf'{re.escape(word)}', replacement, redacted_text, flags=flags)
             else:
                 if name_to_check in text_to_check:
                     replacement = self.apply_case(name, redaction_text) if preserve_case else redaction_text
-                    pattern = name if not case_insensitive else re.compile(re.escape(name), re.IGNORECASE)
-                    redacted_text = re.sub(pattern, replacement, redacted_text)
+                    flags = re.IGNORECASE if case_insensitive else 0
+                    redacted_text = re.sub(rf'{re.escape(name)}', replacement, redacted_text, flags=flags)
 
         return redacted_text
 
