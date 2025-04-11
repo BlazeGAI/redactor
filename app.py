@@ -189,7 +189,8 @@ def main():
 
     if uploaded_file is not None:
         file_extension = uploaded_file.name.split('.')[-1]
-        output_filename = uploaded_file.name.replace(f'.{file_extension}', '_redacted.{file_extension}')
+        base_name = uploaded_file.name.rsplit('.', 1)[0]
+        output_filename = f"{base_name}.Redacted.{file_extension}"
 
         if st.button("Preview Redaction"):
             try:
@@ -204,6 +205,7 @@ def main():
                             for shape in slide.shapes if hasattr(shape, "text")
                         ])
 
+                    redactor.load_names_from_csv(name_csv) if name_csv else None
                     redacted_preview = redactor.redact_names(preview_text)
 
                     col1, col2 = st.columns(2)
