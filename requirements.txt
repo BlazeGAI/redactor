@@ -1,4 +1,2 @@
 streamlit
-python-docx
 PyMuPDF
-python-pptx
