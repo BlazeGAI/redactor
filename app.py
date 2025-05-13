@@ -1,12 +1,18 @@
 import streamlit as st
 import logging
 import re
-import unicodedata
 import pandas as pd
 from io import BytesIO
 from docx import Document
 from pptx import Presentation
 import fitz  # PyMuPDF
+
+# spaCy for robust multi-word name detection
+try:
+    import spacy
+    nlp = spacy.load("en_core_web_sm")
+except Exception:
+    nlp = None
 
 class DocumentRedactor:
     def __init__(self):
@@ -31,10 +37,6 @@ class DocumentRedactor:
         self.custom_names = seen
         logging.info(f"Loaded {len(self.custom_names)} names for redaction")
 
-    def normalize(self, text):
-        text = unicodedata.normalize('NFKD', text)
-        return ''.join(c if ord(c) >= 32 else ' ' for c in text)
-
     def apply_case(self, source, repl):
         if source.isupper():
             return repl.upper()
@@ -42,10 +44,44 @@ class DocumentRedactor:
             return repl.title()
         return repl
 
-    def redact_names_text(self, text):
+    def extract_titlecase_ngrams(self, text, min_words=2, max_words=4):
+        org_exclusions = ["University", "College", "Institute", "Department", "School"]
+        tokens = re.findall(r"\b[^\s]+\b", text)
+        seqs = set()
+        for n in range(min_words, max_words+1):
+            for i in range(len(tokens) - n + 1):
+                seq = " ".join(tokens[i:i+n])
+                words = seq.split()
+                if all(re.match(r"^[A-Z][a-zA-Z'’-]+$", w) for w in words):
+                    if not any(w.lower() in (org.lower() for org in org_exclusions) for w in words):
+                        seqs.add(seq)
+        return seqs
+
+    def detect_human_names(self, text):
+        """
+        Combine spaCy NER, honorific regex, and TitleCase n-grams for name detection.
+        """
+        names = set()
+        # 1) spaCy NER
+        if nlp:
+            doc = nlp(text)
+            for ent in doc.ents:
+                if ent.label_ == "PERSON":
+                    names.add(ent.text)
+        # 2) honorific-based names (multi-word)
+        honorific_pattern = r"\b(Professor|Dr|Mr|Mrs|Ms|Miss)\.?\s+[A-Z][a-zA-Z'’-]+(?:\s+[A-Z][a-zA-Z'’-]+)*\b"
+        for m in re.finditer(honorific_pattern, text):
+            names.add(m.group())
+        # 3) TitleCase sliding-window (fallback if spaCy unavailable)
+        if not nlp:
+            for seq in self.extract_titlecase_ngrams(text):
+                names.add(seq)
+        return list(names)
+
+    def redact_text(self, text, names_list):
         flags = re.IGNORECASE
         redacted = text
-        for name in sorted(self.custom_names, key=len, reverse=True):
+        for name in sorted(names_list, key=len, reverse=True):
             pattern = rf"\b{re.escape(name)}\b"
             redacted = re.sub(
                 pattern,
@@ -55,52 +91,33 @@ class DocumentRedactor:
             )
         return redacted
 
-    def redact_fallback_text(self, text):
-        # Honorific-based titles
-        patterns = [
-            r"\b(Professor|Dr|Mr|Mrs|Ms|Miss)\.?\s+[A-Z][a-zA-Z]+\b",
-        ]
-        # Two-word TitleCase human names, excluding common organization words
-        org_exclusions = ["University", "College", "Institute", "Department", "School"]
-        excl = "|".join(org_exclusions)
-        titlecase_pattern = rf"\b(?!{excl})[A-Z][a-zA-Z]+\s+(?!{excl})[A-Z][a-zA-Z]+\b"
-        patterns.append(titlecase_pattern)
-
-        for pat in patterns:
-            text = re.sub(pat, self.redaction_text, text, flags=re.IGNORECASE)
-        return text
-
     def process_word(self, file_bytes, out_path):
         doc = Document(BytesIO(file_bytes))
         count = 0
-        paras = doc.paragraphs
-        if self.custom_names:
-            targets = paras
-        else:
-            # Fallback: approximate first two pages via first 10 paragraphs
-            targets = paras[:10]
-        for p in targets:
+        paras = doc.paragraphs[:10] if not self.custom_names else doc.paragraphs
+        for p in paras:
             original = p.text
-            new = (self.redact_names_text(original) if self.custom_names else self.redact_fallback_text(original))
+            names = self.custom_names or self.detect_human_names(original)
+            new = self.redact_text(original, names)
             if new != original:
                 for run in p.runs:
                     run.text = new
                 count += 1
-        # Tables
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
                     text = cell.text
-                    new = (self.redact_names_text(text) if self.custom_names else self.redact_fallback_text(text))
+                    names = self.custom_names or self.detect_human_names(text)
+                    new = self.redact_text(text, names)
                     if new != text:
                         cell.text = new
                         count += 1
-        # Headers & footers
         for section in doc.sections:
             for part in (section.header, section.footer):
                 for p in part.paragraphs:
                     text = p.text
-                    new = (self.redact_names_text(text) if self.custom_names else self.redact_fallback_text(text))
+                    names = self.custom_names or self.detect_human_names(text)
+                    new = self.redact_text(text, names)
                     if new != text:
                         p.text = new
                         count += 1
@@ -110,18 +127,15 @@ class DocumentRedactor:
     def process_ppt(self, file_bytes, out_path):
         prs = Presentation(BytesIO(file_bytes))
         count = 0
-        if self.custom_names:
-            slide_indices = range(len(prs.slides))
-        else:
-            # Fallback: first two slides
-            slide_indices = [0, 1] if len(prs.slides) > 1 else [0]
-        for i in slide_indices:
+        indices = range(len(prs.slides)) if self.custom_names else ([0,1] if len(prs.slides)>1 else [0])
+        for i in indices:
             slide = prs.slides[i]
             for shape in slide.shapes:
                 if hasattr(shape, 'text_frame'):
                     for p in shape.text_frame.paragraphs:
                         original = p.text
-                        new = (self.redact_names_text(original) if self.custom_names else self.redact_fallback_text(original))
+                        names = self.custom_names or self.detect_human_names(original)
+                        new = self.redact_text(original, names)
                         if new != original:
                             for run in p.runs:
                                 run.text = new
@@ -132,55 +146,41 @@ class DocumentRedactor:
     def process_pdf(self, file_bytes, out_path):
         pdf = fitz.open(stream=file_bytes, filetype='pdf')
         count = 0
-        if self.custom_names:
-            page_indices = range(pdf.page_count)
-        else:
-            # Fallback: first two pages
-            page_indices = [0, 1] if pdf.page_count > 1 else [0]
-        for i in page_indices:
+        indices = range(pdf.page_count) if self.custom_names else ([0,1] if pdf.page_count>1 else [0])
+        for i in indices:
             page = pdf[i]
-            to_redact = []
-            if self.custom_names:
-                for name in self.custom_names:
-                    to_redact += page.search_for(name)
-            else:
-                # Honorifics and TitleCase fallback
-                patterns = [r"Professor", r"Dr\.", r"Mr\.", r"Mrs\.", r"Ms\.", r"Miss"]
-                for pat in patterns:
-                    to_redact += page.search_for(pat, flags=fitz.TEXT_DEHYPHENATE)
-                # Exclude organizations in TitleCase
-                for inst in page.search_for(r"[A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+", flags=fitz.TEXT_DEHYPHENATE):
-                    text = page.get_textbox(inst)
-                    if not re.match(rf"^(University|College|Institute|Department|School)$", text.split()[-1], re.IGNORECASE):
-                        to_redact.append(inst)
-            for inst in to_redact:
-                page.add_redact_annot(inst, fill=(0, 0, 0))
+            text = page.get_text()
+            names = self.custom_names or self.detect_human_names(text)
+            insts = []
+            for name in names:
+                insts += page.search_for(name, flags=fitz.TEXT_DEHYPHENATE)
+            for inst in insts:
+                page.add_redact_annot(inst, fill=(0,0,0))
                 count += 1
         pdf.apply_redactions()
         pdf.save(out_path)
         return count
 
     def process(self, uploaded):
-        ext = uploaded.name.rsplit('.', 1)[-1].lower()
-        base = uploaded.name.rsplit('.', 1)[0]
-        out_name = f"{base}-Redacted.{ext}"
+        ext = uploaded.name.rsplit('.',1)[-1].lower()
+        base = uploaded.name.rsplit('.',1)[0]
+        out = f"{base}-Redacted.{ext}"
         data = uploaded.read()
-        if ext == 'docx':
-            count = self.process_word(data, out_name)
-        elif ext in ('ppt', 'pptx'):
-            count = self.process_ppt(data, out_name)
-        elif ext == 'pdf':
-            count = self.process_pdf(data, out_name)
+        if ext=='docx':
+            count = self.process_word(data, out)
+        elif ext in ('ppt','pptx'):
+            count = self.process_ppt(data, out)
+        elif ext=='pdf':
+            count = self.process_pdf(data, out)
         else:
             st.error(f"Unsupported format: {ext}")
-            return None, 0
-        return out_name, count
+            return None,0
+        return out, count
 
 
 def main():
     st.set_page_config(page_title="Name Redactor", layout="wide")
     st.title("Document Name Redactor")
-
     redactor = DocumentRedactor()
 
     st.sidebar.header("Upload Names (CSV)")
@@ -191,21 +191,16 @@ def main():
             st.sidebar.success(f"Loaded {len(redactor.custom_names)} names for redaction")
 
     st.header("Upload Document")
-    uploaded = st.file_uploader("Choose a file (DOCX, PPTX, PDF)", type=['docx', 'ppt', 'pptx', 'pdf'])
-
+    uploaded = st.file_uploader("Choose a file (DOCX, PPTX, PDF)", type=['docx','ppt','pptx','pdf'])
     if uploaded:
         if not redactor.custom_names:
-            st.warning("No name list — scanning first two pages/slides for honorifics and human names (excluding orgs).")
+            st.warning("No name list — scanning first two pages/slides for multi-word human names.")
         if st.button("Redact Document"):
             out_name, count = redactor.process(uploaded)
             if out_name:
-                with open(out_name, 'rb') as f:
-                    st.download_button(
-                        label="Download Redacted",
-                        data=f,
-                        file_name=out_name
-                    )
+                with open(out_name,'rb') as f:
+                    st.download_button(label="Download Redacted", data=f, file_name=out_name)
                 st.success(f"Redacted {count} item(s)")
 
-if __name__ == '__main__':
+if __name__=='__main__':
     main()
