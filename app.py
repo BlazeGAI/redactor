@@ -56,7 +56,6 @@ class DocumentRedactor:
         return redacted
 
     def redact_fallback_text(self, text):
-        # Honorific roles and generic two-word title-case names
         patterns = [
             r"\b(Professor|Dr|Mr|Mrs|Ms|Miss)\.?\s+[A-Z][a-z]+\b",
             r"\b[A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}\b"
@@ -69,7 +68,11 @@ class DocumentRedactor:
         doc = Document(BytesIO(file_bytes))
         count = 0
         paras = doc.paragraphs
-        targets = paras if self.custom_names else (paras[:3] + paras[-3:])
+        if self.custom_names:
+            targets = paras
+        else:
+            # Fallback: first two pages approx via first 10 paragraphs
+            targets = paras[:10]
         for p in targets:
             original = p.text
             new = (self.redact_names_text(original) if self.custom_names else self.redact_fallback_text(original))
@@ -77,6 +80,7 @@ class DocumentRedactor:
                 for run in p.runs:
                     run.text = new
                 count += 1
+        # Process tables (fallback applies only to first table cells if no names?)
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
@@ -85,6 +89,7 @@ class DocumentRedactor:
                     if new != text:
                         cell.text = new
                         count += 1
+        # Headers & footers
         for section in doc.sections:
             for part in (section.header, section.footer):
                 for p in part.paragraphs:
@@ -99,7 +104,10 @@ class DocumentRedactor:
     def process_ppt(self, file_bytes, out_path):
         prs = Presentation(BytesIO(file_bytes))
         count = 0
-        slide_indices = range(len(prs.slides)) if self.custom_names else [0, len(prs.slides) - 1]
+        if self.custom_names:
+            slide_indices = range(len(prs.slides))
+        else:
+            slide_indices = [0, 1] if len(prs.slides) > 1 else [0]
         for i in slide_indices:
             slide = prs.slides[i]
             for shape in slide.shapes:
@@ -117,25 +125,23 @@ class DocumentRedactor:
     def process_pdf(self, file_bytes, out_path):
         pdf = fitz.open(stream=file_bytes, filetype='pdf')
         count = 0
-        total_pages = pdf.page_count
-        for page in pdf:
+        if self.custom_names:
+            page_indices = range(pdf.page_count)
+        else:
+            page_indices = [0, 1] if pdf.page_count > 1 else [0]
+        for i in page_indices:
+            page = pdf[i]
             to_redact = []
             if self.custom_names:
                 for name in self.custom_names:
                     to_redact += page.search_for(name)
             else:
-                if page.number in (0, total_pages - 1):
-                    for pat in [
-                        r"Professor",
-                        r"Dr\\.",
-                        r"Mr\\.",
-                        r"Mrs\\.",
-                        r"Ms\\.",
-                        r"Miss"
-                    ]:
-                        to_redact += page.search_for(pat, flags=fitz.TEXT_DEHYPHENATE)
-                    # Generic two-word names
-                    to_redact += page.search_for(r"[A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}", flags=fitz.TEXT_DEHYPHENATE)
+                # Honorifics and two-word TitleCase
+                for pat in [
+                    r"Professor", r"Dr\\.", r"Mr\\.", r"Mrs\\.", r"Ms\\.", r"Miss",
+                    r"[A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}"
+                ]:
+                    to_redact += page.search_for(pat, flags=fitz.TEXT_DEHYPHENATE)
             for inst in to_redact:
                 page.add_redact_annot(inst, fill=(0, 0, 0))
                 count += 1
@@ -178,7 +184,7 @@ def main():
 
     if uploaded:
         if not redactor.custom_names:
-            st.warning("No name list — scanning title and end for honorifics and two-word names.")
+            st.warning("No name list — scanning first two pages/slides for honorifics and two-word names.")
         if st.button("Redact Document"):
             out_name, count = redactor.process(uploaded)
             if out_name:
