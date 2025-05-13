@@ -175,8 +175,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📄 Word, PowerPoint & PDF Name Redactor 📛")
-st.markdown("Welcome! This tool redacts names from documents. Configure settings, upload files, and download.")
+st.title("🐉 TU File Name Redactor")
+st.markdown("Welcome to the TU File Name Redactor! This tool helps you remove sensitive names from your documents. Upload your files, specify the names, and download the redacted versions.")
 st.markdown("---")
 
 with st.sidebar:
