@@ -127,7 +127,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📄 TU File Name Redactor")
+st.title("🐉 TU File Name Redactor")
 st.markdown("Welcome to the TU File Name Redactor! This tool helps you remove sensitive names from your documents. Upload your files, specify the names, and download the redacted versions.")
 st.markdown("---")
 
