@@ -8,7 +8,6 @@ from docx import Document
 from pptx import Presentation
 import fitz  # PyMuPDF
 
-# --- Redactor Class ---
 class DocumentRedactor:
     def __init__(self):
         self.custom_names = []
@@ -21,12 +20,10 @@ class DocumentRedactor:
             st.error("CSV must contain a 'Name' column.")
             return
         names = df['Name'].dropna().astype(str).str.strip().tolist()
-        # generate simple variations
         variations = []
         for name in names:
             parts = name.split()
             variations += [p for p in parts if len(p) > 2]
-        # preserve order and uniqueness
         seen = []
         for n in names + variations:
             if n not in seen:
@@ -58,9 +55,15 @@ class DocumentRedactor:
             )
         return redacted
 
-    def redact_roles_text(self, text):
-        pattern = r"\b(Professor|Dr|Mr|Mrs|Ms|Miss)\.?\s+[A-Z][a-z]+\b"
-        return re.sub(pattern, self.redaction_text, text, flags=re.IGNORECASE)
+    def redact_fallback_text(self, text):
+        # Honorific roles and generic two-word title-case names
+        patterns = [
+            r"\b(Professor|Dr|Mr|Mrs|Ms|Miss)\.?\s+[A-Z][a-z]+\b",
+            r"\b[A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}\b"
+        ]
+        for pat in patterns:
+            text = re.sub(pat, self.redaction_text, text, flags=re.IGNORECASE)
+        return text
 
     def process_word(self, file_bytes, out_path):
         doc = Document(BytesIO(file_bytes))
@@ -69,17 +72,16 @@ class DocumentRedactor:
         targets = paras if self.custom_names else (paras[:3] + paras[-3:])
         for p in targets:
             original = p.text
-            new = (self.redact_names_text(original) if self.custom_names else self.redact_roles_text(original))
+            new = (self.redact_names_text(original) if self.custom_names else self.redact_fallback_text(original))
             if new != original:
                 for run in p.runs:
                     run.text = new
                 count += 1
-        # tables, headers, footers likewise
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
                     text = cell.text
-                    new = (self.redact_names_text(text) if self.custom_names else self.redact_roles_text(text))
+                    new = (self.redact_names_text(text) if self.custom_names else self.redact_fallback_text(text))
                     if new != text:
                         cell.text = new
                         count += 1
@@ -87,7 +89,7 @@ class DocumentRedactor:
             for part in (section.header, section.footer):
                 for p in part.paragraphs:
                     text = p.text
-                    new = (self.redact_names_text(text) if self.custom_names else self.redact_roles_text(text))
+                    new = (self.redact_names_text(text) if self.custom_names else self.redact_fallback_text(text))
                     if new != text:
                         p.text = new
                         count += 1
@@ -104,7 +106,7 @@ class DocumentRedactor:
                 if hasattr(shape, 'text_frame'):
                     for p in shape.text_frame.paragraphs:
                         original = p.text
-                        new = (self.redact_names_text(original) if self.custom_names else self.redact_roles_text(original))
+                        new = (self.redact_names_text(original) if self.custom_names else self.redact_fallback_text(original))
                         if new != original:
                             for run in p.runs:
                                 run.text = new
@@ -123,9 +125,17 @@ class DocumentRedactor:
                     to_redact += page.search_for(name)
             else:
                 if page.number in (0, total_pages - 1):
-                    matches = page.search_for(r"Professor", flags=fitz.TEXT_DEHYPHENATE)
-                    to_redact += matches
-                    # repeat for other honorifics as needed
+                    for pat in [
+                        r"Professor",
+                        r"Dr\\.",
+                        r"Mr\\.",
+                        r"Mrs\\.",
+                        r"Ms\\.",
+                        r"Miss"
+                    ]:
+                        to_redact += page.search_for(pat, flags=fitz.TEXT_DEHYPHENATE)
+                    # Generic two-word names
+                    to_redact += page.search_for(r"[A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}", flags=fitz.TEXT_DEHYPHENATE)
             for inst in to_redact:
                 page.add_redact_annot(inst, fill=(0, 0, 0))
                 count += 1
@@ -149,7 +159,6 @@ class DocumentRedactor:
             return None, 0
         return out_name, count
 
-# --- Streamlit UI ---
 
 def main():
     st.set_page_config(page_title="Name Redactor", layout="wide")
@@ -169,7 +178,7 @@ def main():
 
     if uploaded:
         if not redactor.custom_names:
-            st.warning("No name list provided — scanning title and references for honorifics.")
+            st.warning("No name list — scanning title and end for honorifics and two-word names.")
         if st.button("Redact Document"):
             out_name, count = redactor.process(uploaded)
             if out_name:
