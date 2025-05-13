@@ -1,185 +1,119 @@
 import streamlit as st
-import docx
-from pptx import Presentation
-from pptx.dml.color import RGBColor
-from pptx.enum.dml import MSO_COLOR_TYPE
-# from pptx.enum.shapes import MSO_SHAPE_TYPE # Keep for potential future recursion for group shapes
 import fitz  # PyMuPDF
 import io
 import re
 import os
-import traceback
+import subprocess # For calling LibreOffice
+import tempfile # For managing temporary files
+import traceback # For detailed error messages
+import shutil # For finding executable
 
-# --- Helper Functions for Redaction ---
+# --- Configuration for LibreOffice ---
+# Try to find soffice automatically, but allow override if needed
+LIBREOFFICE_PATH = shutil.which("soffice") or shutil.which("libreoffice")
+# If on Windows and not in PATH, you might need to set this manually:
+# LIBREOFFICE_PATH = "C:\\Program Files\\LibreOffice\\program\\soffice.exe"
+# If on macOS and not in PATH, you might need something like:
+# LIBREOFFICE_PATH = "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+
+# --- Helper Functions ---
 
 def redact_names_in_text(text, names_to_redact, placeholder="[REDACTED NAME]"):
+    """
+    Redacts a list of names from a given text string.
+    Uses regex for whole-word, case-insensitive matching.
+    """
     redacted_text = text
     for name in names_to_redact:
         if not name.strip():
             continue
-        # Ensure name from list is also stripped for the pattern
         pattern = r'\b' + re.escape(name.strip()) + r'\b'
         redacted_text = re.sub(pattern, placeholder, redacted_text, flags=re.IGNORECASE)
     return redacted_text
 
-# --- PPTX Text Frame Processing Helper ---
-def _process_text_frame_pptx(text_frame, names_to_redact, placeholder, debug_prefix=""):
+def convert_to_pdf_libreoffice(input_file_path, output_directory):
     """
-    Helper to process paragraphs within a given PowerPoint text_frame.
-    Returns True if any redaction occurred in this text_frame.
+    Converts a document to PDF using LibreOffice.
+    Returns the path to the converted PDF file or None on error.
     """
-    redaction_occurred_in_frame = False
-    for para_idx, paragraph in enumerate(text_frame.paragraphs):
-        original_runs_data = []
-        for run in paragraph.runs:
-            font_color_type = None
-            font_color_val = None
-            if hasattr(run.font.color, 'type'):
-                if run.font.color.type == MSO_COLOR_TYPE.RGB:
-                    font_color_type = MSO_COLOR_TYPE.RGB
-                    font_color_val = run.font.color.rgb
-                elif run.font.color.type == MSO_COLOR_TYPE.SCHEME:
-                    font_color_type = MSO_COLOR_TYPE.SCHEME
-                    font_color_val = run.font.color.theme_color
-            original_runs_data.append({
-                "text": run.text, "bold": run.font.bold, "italic": run.font.italic,
-                "underline": run.font.underline, "name": run.font.name, "size": run.font.size,
-                "color_type": font_color_type, "color_val": font_color_val
-            })
+    if not LIBREOFFICE_PATH:
+        st.error("LibreOffice 'soffice' command not found. Please ensure LibreOffice is installed and in your system's PATH.")
+        return None
 
-        full_para_text = "".join([r['text'] for r in original_runs_data])
-        if not full_para_text.strip():
-            continue
+    base_name_without_ext = os.path.splitext(os.path.basename(input_file_path))[0]
+    converted_pdf_name = f"{base_name_without_ext}.pdf"
+    converted_pdf_path = os.path.join(output_directory, converted_pdf_name)
 
-        # --- DEBUG ---
-        # st.write(f"{debug_prefix} Para {para_idx} Text: '{full_para_text}'")
-        # -------------
-
-        redacted_para_text = redact_names_in_text(full_para_text, names_to_redact, placeholder)
-
-        if full_para_text != redacted_para_text:
-            st.info(f"{debug_prefix} Para {para_idx}: REDACTING '{full_para_text[:30]}...' TO '{redacted_para_text[:30]}...'") # DEBUG
-            redaction_occurred_in_frame = True
-            
-            p = paragraph._p
-            for _ in range(len(p.r_lst)):
-                p.remove(p.r_lst[0])
-            
-            new_run = paragraph.add_run()
-            new_run.text = redacted_para_text
-            
-            if original_runs_data:
-                first_run_format = original_runs_data[0]
-                if first_run_format["bold"] is not None: new_run.font.bold = first_run_format["bold"]
-                if first_run_format["italic"] is not None: new_run.font.italic = first_run_format["italic"]
-                if first_run_format["underline"] is not None: # True, False, None, or Enum
-                    try: new_run.font.underline = first_run_format["underline"]
-                    except: pass # If direct assignment fails for some complex underline type
-                if first_run_format["name"]: new_run.font.name = first_run_format["name"]
-                if first_run_format["size"]: new_run.font.size = first_run_format["size"]
-                
-                if first_run_format["color_type"] == MSO_COLOR_TYPE.RGB and first_run_format["color_val"]:
-                    new_run.font.color.rgb = RGBColor(*first_run_format["color_val"])
-                elif first_run_format["color_type"] == MSO_COLOR_TYPE.SCHEME and first_run_format["color_val"] is not None:
-                    try: new_run.font.color.theme_color = first_run_format["color_val"]
-                    except: pass
-        # else: # DEBUG
-        #     st.write(f"{debug_prefix} Para {para_idx}: NO REDACTION for: '{full_para_text[:50]}...'") # DEBUG
-            
-    return redaction_occurred_in_frame
-
-
-def redact_docx(file_bytes, names_to_redact, placeholder="[REDACTED NAME]"):
     try:
-        doc = docx.Document(io.BytesIO(file_bytes))
-        elements_to_process = []
-        for para in doc.paragraphs:
-            elements_to_process.append(para)
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    for para_in_cell in cell.paragraphs: # Corrected variable name
-                        elements_to_process.append(para_in_cell)
-
-        redaction_occurred_overall = False
-        st.write(f"DOCX: Names to redact: {names_to_redact}") # DEBUG
-
-        for para_idx, para in enumerate(elements_to_process):
-            if not para.text.strip():
-                continue
-            
-            original_runs_data = []
-            for run in para.runs:
-                original_runs_data.append({
-                    "text": run.text, "bold": run.font.bold,
-                    "italic": run.font.italic, "underline": run.font.underline,
-                })
-            
-            full_para_text = "".join([r['text'] for r in original_runs_data])
-            if not full_para_text.strip():
-                continue
-
-            # st.write(f"DOCX Para {para_idx} Text: '{full_para_text}'") # DEBUG
-
-            redacted_para_text = redact_names_in_text(full_para_text, names_to_redact, placeholder)
-
-            if full_para_text != redacted_para_text:
-                st.info(f"DOCX Para {para_idx}: REDACTING '{full_para_text[:30]}...' TO '{redacted_para_text[:30]}...'") # DEBUG
-                redaction_occurred_overall = True
-                
-                for _ in range(len(para.runs)):
-                    p_element = para._p
-                    p_element.remove(para.runs[0]._r)
-                
-                new_run = para.add_run(redacted_para_text)
-                
-                if original_runs_data:
-                    first_run_props = original_runs_data[0]
-                    if first_run_props["bold"] is not None: new_run.font.bold = first_run_props["bold"]
-                    if first_run_props["italic"] is not None: new_run.font.italic = first_run_props["italic"]
-                    if first_run_props["underline"] is not None:
-                        try: new_run.font.underline = first_run_props["underline"]
-                        except: pass
-        
-        if not redaction_occurred_overall:
-            st.warning("DOCX: No text was identified for redaction. Check input names and file content. Review debug output above if any.")
-
-        output_buffer = io.BytesIO()
-        doc.save(output_buffer)
-        output_buffer.seek(0)
-        return output_buffer
+        st.write(f"Attempting conversion: {LIBREOFFICE_PATH} --headless --convert-to pdf \"{input_file_path}\" --outdir \"{output_directory}\"")
+        process = subprocess.run(
+            [LIBREOFFICE_PATH, "--headless", "--convert-to", "pdf", input_file_path, "--outdir", output_directory],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60  # Timeout after 60 seconds
+        )
+        if process.returncode == 0:
+            # Check if the expected PDF file was created
+            if os.path.exists(converted_pdf_path):
+                st.write(f"Successfully converted to: {converted_pdf_path}")
+                return converted_pdf_path
+            else:
+                st.error(f"LibreOffice conversion seemed successful (exit code 0) but output PDF not found at: {converted_pdf_path}")
+                st.error(f"LibreOffice stdout: {process.stdout.decode('utf-8', errors='ignore')}")
+                st.error(f"LibreOffice stderr: {process.stderr.decode('utf-8', errors='ignore')}")
+                return None
+        else:
+            st.error(f"LibreOffice conversion failed with exit code {process.returncode}.")
+            st.error(f"Input file: {input_file_path}")
+            st.error(f"Output directory: {output_directory}")
+            st.error(f"LibreOffice stdout: {process.stdout.decode('utf-8', errors='ignore')}")
+            st.error(f"LibreOffice stderr: {process.stderr.decode('utf-8', errors='ignore')}")
+            return None
+    except subprocess.TimeoutExpired:
+        st.error("LibreOffice conversion timed out.")
+        return None
     except Exception as e:
-        st.error(f"Error processing DOCX: {e}")
+        st.error(f"An error occurred during LibreOffice conversion: {e}")
         st.error(traceback.format_exc())
         return None
 
-def redact_pdf(file_bytes, names_to_redact, placeholder="[REDACTED NAME]"):
+def redact_pdf_bytes(pdf_file_bytes, names_to_redact, placeholder="[REDACTED NAME]"):
+    """
+    Redacts names from the first two pages of a PDF file (provided as bytes).
+    """
     try:
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        doc = fitz.open(stream=pdf_file_bytes, filetype="pdf")
         num_pages_to_process = min(2, doc.page_count)
         redaction_occurred_overall = False
-        st.write(f"PDF: Names to redact: {names_to_redact}") # DEBUG
+        st.write(f"PDF Redaction: Names to redact: {names_to_redact}")
 
         for page_num in range(num_pages_to_process):
             page = doc.load_page(page_num)
-            page_redacted = False
+            page_redacted_this_pass = False
             for name in names_to_redact:
                 if not name.strip():
                     continue
                 
                 text_instances = page.search_for(name, quads=True)
                 if text_instances:
-                    st.info(f"PDF Page {page_num+1}: Found '{name}', adding redaction annotations.") # DEBUG
+                    st.info(f"PDF Page {page_num+1}: Found '{name}', adding redaction annotations.")
                     redaction_occurred_overall = True
-                    page_redacted = True
+                    page_redacted_this_pass = True
                 for inst in text_instances:
-                    annot = page.add_redact_annot(inst, text=placeholder, fill=(0,0,0)) 
-            
-            if page_redacted: # Apply redactions only if something was added to this page
+                    # Add redaction annotation with placeholder text
+                    # PyMuPDF doesn't directly overlay text on the redaction box by default in the same way
+                    # you might fill a rectangle with text. The `text` parameter in `add_redact_annot`
+                    # is for the 'Contents' entry of the annotation, not visible text.
+                    # To put visible text, we'd fill the area, then add text.
+                    # For simplicity, we'll use the standard black box redaction.
+                    # If placeholder text *on* the redaction is critical, it's more complex.
+                    page.add_redact_annot(inst, text="", fill=(0,0,0)) # Black fill, no overlay text
+
+            if page_redacted_this_pass:
                 page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
         if not redaction_occurred_overall:
-            st.warning("PDF: No text was identified for redaction. Check input names and file content. Note: PDF search is case-sensitive by default in PyMuPDF for the `search_for` method.")
+            st.warning("PDF Redaction: No text was identified for redaction within the first two pages. Check input names and file content. Note: PDF search is case-sensitive by default in PyMuPDF.")
 
         output_buffer = io.BytesIO()
         doc.save(output_buffer, garbage=4, deflate=True, clean=True)
@@ -187,88 +121,47 @@ def redact_pdf(file_bytes, names_to_redact, placeholder="[REDACTED NAME]"):
         output_buffer.seek(0)
         return output_buffer
     except Exception as e:
-        st.error(f"Error processing PDF: {e}")
+        st.error(f"Error during PDF redaction: {e}")
         st.error(traceback.format_exc())
-        return None
-
-def redact_pptx(file_bytes, names_to_redact, placeholder="[REDACTED NAME]"):
-    try:
-        prs = Presentation(io.BytesIO(file_bytes))
-        num_slides_to_process = min(2, len(prs.slides))
-        st.write(f"PPTX: Processing {num_slides_to_process} slides.")
-        st.write(f"PPTX: Names to redact: {names_to_redact}") # DEBUG
-
-        redaction_occurred_somewhere = False
-
-        for i in range(num_slides_to_process):
-            slide = prs.slides[i]
-            # st.write(f"PPTX: --- Processing Slide {i+1} ---") # DEBUG
-
-            # Process shapes directly on the slide
-            for shape_idx, shape in enumerate(slide.shapes):
-                debug_shape_prefix = f"PPTX Slide {i+1} Shape {shape_idx}"
-                if shape.has_text_frame:
-                    # st.write(f"{debug_shape_prefix}: Has direct text frame.") # DEBUG
-                    if _process_text_frame_pptx(shape.text_frame, names_to_redact, placeholder, f"{debug_shape_prefix} DirectTF"):
-                        redaction_occurred_somewhere = True
-                
-                if shape.has_table:
-                    # st.write(f"{debug_shape_prefix}: Has table.") # DEBUG
-                    table = shape.table
-                    for row_idx, row in enumerate(table.rows):
-                        for col_idx, cell in enumerate(row.cells):
-                            if cell.text_frame:
-                                # st.write(f"{debug_shape_prefix} Table R{row_idx}C{col_idx}: Has text frame.") # DEBUG
-                                if _process_text_frame_pptx(cell.text_frame, names_to_redact, placeholder, f"{debug_shape_prefix} TableR{row_idx}C{col_idx}"):
-                                    redaction_occurred_somewhere = True
-                
-                # To handle grouped shapes, you'd check shape.shape_type == MSO_SHAPE_TYPE.GROUP
-                # and then recursively call a function on shape.shapes.
-                # from pptx.enum.shapes import MSO_SHAPE_TYPE (at top)
-                # if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
-                #   st.write(f"{debug_shape_prefix}: Is a GROUP. Recursing...") # DEBUG
-                #   # Need a recursive helper function here for shape.shapes collection
-                #   # For now, this is omitted for simplicity but is a known extension point.
-
-        if not redaction_occurred_somewhere:
-            st.warning("PPTX: No text was identified for redaction. Check input names and file content. Review debug output above if any.")
-        
-        output_buffer = io.BytesIO()
-        prs.save(output_buffer)
-        output_buffer.seek(0)
-        return output_buffer
-    except Exception as e:
-        st.error(f"Error processing PPTX: {e}")
-        st.error(traceback.format_exc()) 
         return None
 
 # --- Streamlit App ---
 st.set_page_config(layout="wide")
-st.title("📄 Document Name Redactor 🤫")
+st.title("📄 Universal Document Name Redactor (via PDF) 🤫")
+
 st.markdown("""
-Upload a Word (.docx), PDF (.pdf), or PowerPoint (.pptx) file.
-Enter the names to redact (comma-separated).
-The tool will attempt to redact these names, primarily focusing on the **first two pages/slides**.
-**Note:** Review debug messages below the button after processing, especially if redaction doesn't seem to work as expected.
+Upload a Word (.docx), PowerPoint (.pptx), or PDF (.pdf) file.
+The application will **convert DOCX and PPTX files to PDF** using LibreOffice first,
+then attempt to redact the specified names from the **first two pages** of the (converted) PDF.
 """)
+
+if not LIBREOFFICE_PATH:
+    st.error(
+        "**Critical Setup Error:** LibreOffice (soffice) was not found. "
+        "DOCX and PPTX conversion will fail. Please install LibreOffice and ensure "
+        "'soffice' or 'libreoffice' is in your system's PATH, or configure `LIBREOFFICE_PATH` in the script."
+    )
+else:
+    st.success(f"Using LibreOffice found at: {LIBREOFFICE_PATH}")
+
 
 # Input: Names to redact
 st.sidebar.subheader("Names to Redact")
 names_input = st.sidebar.text_area(
-    "Enter names, separated by commas (case-insensitive match):",
+    "Enter names, separated by commas (case-insensitive match for redaction):",
     "Prof. Dumbledore, Albus Dumbledore, Minerva McGonagall, Severus Snape, Tom Riddle",
     height=150
 )
 raw_names = [name.strip() for name in names_input.split(',') if name.strip()]
-# Filter out very short names to avoid accidental redactions if desired, e.g. names less than 3 chars
-names_to_redact = [name for name in raw_names if len(name) > 2] 
+names_to_redact = [name for name in raw_names if len(name) > 2]
 if len(raw_names) != len(names_to_redact):
     st.sidebar.caption(f"Note: {len(raw_names) - len(names_to_redact)} short name(s) (<=2 chars) were ignored.")
 
-
-# Input: Placeholder text
-st.sidebar.subheader("Redaction Placeholder")
-placeholder_text = st.sidebar.text_input("Text to replace names with:", "[REDACTED NAME]")
+# Input: Placeholder text (Note: PyMuPDF redaction primarily blacks out, visible placeholder is harder)
+st.sidebar.subheader("Redaction Style")
+# placeholder_text = st.sidebar.text_input("Placeholder text (visual effect varies):", "[REDACTED]")
+st.sidebar.info("Names will be redacted with a black box. Direct text overlay on redaction is complex with PyMuPDF.")
+placeholder_text = "[REDACTED]" # Kept for consistency, but less visually prominent in PDF
 
 
 # Input: File uploader
@@ -278,44 +171,65 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    file_bytes = uploaded_file.getvalue()
-    file_name = uploaded_file.name
-    file_extension = os.path.splitext(file_name)[1].lower()
+    original_file_bytes = uploaded_file.getvalue()
+    original_file_name = uploaded_file.name
+    original_file_extension = os.path.splitext(original_file_name)[1].lower()
 
-    st.markdown(f"**Uploaded file:** `{file_name}`")
+    st.markdown(f"**Uploaded file:** `{original_file_name}`")
 
     if not names_to_redact:
         st.warning("Please enter at least one name (3+ characters) to redact in the sidebar.")
     else:
-        if st.button("Redact Names 🕵️‍♀️"):
-            st.markdown("---") # Separator for debug output
-            st.subheader("Redaction Process Log:")
-            redacted_file_bytes = None
-            output_file_name = f"redacted_{file_name}"
+        if st.button("Convert and Redact Names 🕵️‍♀️"):
+            st.markdown("---")
+            st.subheader("Processing Log:")
+            redacted_output_bytes = None
+            output_file_name_base = os.path.splitext(original_file_name)[0]
+            final_output_filename = f"redacted_{output_file_name_base}.pdf" # Output is always PDF
 
-            with st.spinner(f"Redacting names from {file_name}... This may take a moment."):
-                if file_extension == ".docx":
-                    redacted_file_bytes = redact_docx(file_bytes, names_to_redact, placeholder_text)
-                elif file_extension == ".pdf":
-                    redacted_file_bytes = redact_pdf(file_bytes, names_to_redact, placeholder_text)
-                elif file_extension == ".pptx":
-                    redacted_file_bytes = redact_pptx(file_bytes, names_to_redact, placeholder_text)
+            with st.spinner(f"Processing {original_file_name}... This may take a moment."):
+                pdf_to_redact_bytes = None
+
+                if original_file_extension in [".docx", ".pptx"]:
+                    st.write(f"Detected {original_file_extension.upper()} file. Attempting conversion to PDF...")
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        temp_original_file_path = os.path.join(temp_dir, original_file_name)
+                        with open(temp_original_file_path, "wb") as f_temp:
+                            f_temp.write(original_file_bytes)
+
+                        converted_pdf_path = convert_to_pdf_libreoffice(temp_original_file_path, temp_dir)
+
+                        if converted_pdf_path and os.path.exists(converted_pdf_path):
+                            st.write(f"Conversion successful. Reading converted PDF: {converted_pdf_path}")
+                            with open(converted_pdf_path, "rb") as f_pdf:
+                                pdf_to_redact_bytes = f_pdf.read()
+                        else:
+                            st.error("Failed to convert the document to PDF. Cannot proceed with redaction.")
+                            pdf_to_redact_bytes = None # Ensure it's None
+                elif original_file_extension == ".pdf":
+                    st.write("Detected PDF file. Proceeding directly to redaction.")
+                    pdf_to_redact_bytes = original_file_bytes
                 else:
                     st.error("Unsupported file type.")
+                    pdf_to_redact_bytes = None
 
-            if redacted_file_bytes:
-                st.success("Redaction attempt complete! 🎉")
+                if pdf_to_redact_bytes:
+                    st.write("Starting PDF redaction process...")
+                    redacted_output_bytes = redact_pdf_bytes(pdf_to_redact_bytes, names_to_redact, placeholder_text)
+
+            if redacted_output_bytes:
+                st.success("Redaction attempt complete! 🎉 The output is a PDF.")
                 st.download_button(
-                    label=f"Download Redacted File ({output_file_name})",
-                    data=redacted_file_bytes,
-                    file_name=output_file_name,
-                    mime=uploaded_file.type
+                    label=f"Download Redacted PDF ({final_output_filename})",
+                    data=redacted_output_bytes,
+                    file_name=final_output_filename,
+                    mime="application/pdf"
                 )
-                st.info("ℹ️ Always review the redacted document carefully to ensure all desired information has been properly redacted and no unintended information was removed or formatting excessively altered. Check the log above for details.")
+                st.info("ℹ️ Always review the redacted PDF carefully. Conversion and redaction might alter layout or miss some occurrences.")
             else:
                 st.error("Redaction process did not produce an output file. See logs above for details.")
 else:
-    st.info("Upload a file to begin the redaction process.")
+    st.info("Upload a file to begin the conversion and redaction process.")
 
 st.markdown("---")
 st.markdown("Created with ❤️ by a Streamlit enthusiast.")
