@@ -56,10 +56,16 @@ class DocumentRedactor:
         return redacted
 
     def redact_fallback_text(self, text):
+        # Honorific-based titles
         patterns = [
-            r"\b(Professor|Dr|Mr|Mrs|Ms|Miss)\.?\s+[A-Z][a-z]+\b",
-            r"\b[A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}\b"
+            r"\b(Professor|Dr|Mr|Mrs|Ms|Miss)\.?\s+[A-Z][a-zA-Z]+\b",
         ]
+        # Two-word TitleCase human names, excluding common organization words
+        org_exclusions = ["University", "College", "Institute", "Department", "School"]
+        excl = "|".join(org_exclusions)
+        titlecase_pattern = rf"\b(?!{excl})[A-Z][a-zA-Z]+\s+(?!{excl})[A-Z][a-zA-Z]+\b"
+        patterns.append(titlecase_pattern)
+
         for pat in patterns:
             text = re.sub(pat, self.redaction_text, text, flags=re.IGNORECASE)
         return text
@@ -71,7 +77,7 @@ class DocumentRedactor:
         if self.custom_names:
             targets = paras
         else:
-            # Fallback: first two pages approx via first 10 paragraphs
+            # Fallback: approximate first two pages via first 10 paragraphs
             targets = paras[:10]
         for p in targets:
             original = p.text
@@ -80,7 +86,7 @@ class DocumentRedactor:
                 for run in p.runs:
                     run.text = new
                 count += 1
-        # Process tables (fallback applies only to first table cells if no names?)
+        # Tables
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
@@ -107,6 +113,7 @@ class DocumentRedactor:
         if self.custom_names:
             slide_indices = range(len(prs.slides))
         else:
+            # Fallback: first two slides
             slide_indices = [0, 1] if len(prs.slides) > 1 else [0]
         for i in slide_indices:
             slide = prs.slides[i]
@@ -128,6 +135,7 @@ class DocumentRedactor:
         if self.custom_names:
             page_indices = range(pdf.page_count)
         else:
+            # Fallback: first two pages
             page_indices = [0, 1] if pdf.page_count > 1 else [0]
         for i in page_indices:
             page = pdf[i]
@@ -136,12 +144,15 @@ class DocumentRedactor:
                 for name in self.custom_names:
                     to_redact += page.search_for(name)
             else:
-                # Honorifics and two-word TitleCase
-                for pat in [
-                    r"Professor", r"Dr\\.", r"Mr\\.", r"Mrs\\.", r"Ms\\.", r"Miss",
-                    r"[A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}"
-                ]:
+                # Honorifics and TitleCase fallback
+                patterns = [r"Professor", r"Dr\.", r"Mr\.", r"Mrs\.", r"Ms\.", r"Miss"]
+                for pat in patterns:
                     to_redact += page.search_for(pat, flags=fitz.TEXT_DEHYPHENATE)
+                # Exclude organizations in TitleCase
+                for inst in page.search_for(r"[A-Z][a-zA-Z]+\s+[A-Z][a-zA-Z]+", flags=fitz.TEXT_DEHYPHENATE):
+                    text = page.get_textbox(inst)
+                    if not re.match(rf"^(University|College|Institute|Department|School)$", text.split()[-1], re.IGNORECASE):
+                        to_redact.append(inst)
             for inst in to_redact:
                 page.add_redact_annot(inst, fill=(0, 0, 0))
                 count += 1
@@ -177,14 +188,14 @@ def main():
     if name_file:
         redactor.load_names_from_csv(name_file)
         if redactor.custom_names:
-            st.sidebar.success(f"Loaded {len(redactor.custom_names)} names")
+            st.sidebar.success(f"Loaded {len(redactor.custom_names)} names for redaction")
 
     st.header("Upload Document")
     uploaded = st.file_uploader("Choose a file (DOCX, PPTX, PDF)", type=['docx', 'ppt', 'pptx', 'pdf'])
 
     if uploaded:
         if not redactor.custom_names:
-            st.warning("No name list — scanning first two pages/slides for honorifics and two-word names.")
+            st.warning("No name list — scanning first two pages/slides for honorifics and human names (excluding orgs).")
         if st.button("Redact Document"):
             out_name, count = redactor.process(uploaded)
             if out_name:
