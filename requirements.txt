@@ -5,6 +5,5 @@ python-pptx>=0.6.21
 PyMuPDF>=1.22.0
 spacy>=3.0
 
-# Direct install of the spaCy English model
-# Adjust the version to match your spaCy installation
-en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.5/en_core_web_sm-3.8.5-py3-none-any.whl
+# Direct install of the spaCy English model matching spaCy 3.8.0
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
