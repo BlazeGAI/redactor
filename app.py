@@ -1,10 +1,14 @@
 import streamlit as st
 import docx
 from pptx import Presentation
+from pptx.dml.color import RGBColor # MODIFIED: For setting RGBColor
+from pptx.enum.dml import MSO_COLOR_TYPE # MODIFIED: For checking color type
+# from pptx.enum.dml import MSO_THEME_COLOR_INDEX # For type hinting if needed, but direct use is fine
 import fitz  # PyMuPDF
 import io
 import re
 import os
+import traceback # For detailed error messages
 
 # --- Helper Functions for Redaction ---
 
@@ -17,8 +21,6 @@ def redact_names_in_text(text, names_to_redact, placeholder="[REDACTED NAME]"):
     for name in names_to_redact:
         if not name.strip():  # Skip empty strings
             continue
-        # Regex to match whole word, case-insensitive
-        # \b ensures word boundaries (e.g., "Tom" doesn't match "Tomorrow")
         pattern = r'\b' + re.escape(name) + r'\b'
         redacted_text = re.sub(pattern, placeholder, redacted_text, flags=re.IGNORECASE)
     return redacted_text
@@ -33,17 +35,26 @@ def redact_docx(file_bytes, names_to_redact, placeholder="[REDACTED NAME]"):
         
         # Word doesn't have a strict concept of "pages" like PDF.
         # We will process all paragraphs and tables, assuming names are early.
-        # For a more precise "first two pages" approach, one might need
-        # to estimate based on content length or use commercial libraries.
-        # For this assignment, processing all content is likely acceptable if names are expected early.
+        
+        elements_to_process = list(doc.paragraphs) # Process top-level paragraphs
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    elements_to_process.extend(cell.paragraphs) # Add paragraphs from cells
 
-        # Redact in paragraphs
-        for para in doc.paragraphs:
-            if para.text.strip(): # Process only if paragraph has text
-                # Store original runs and their text
-                original_runs_text = [(run.text, run.style.name if run.style else None, run.font.bold, run.font.italic, run.font.underline) for run in para.runs]
-                full_para_text = "".join([r[0] for r in original_runs_text])
+        for para in elements_to_process: # Iterate through combined list
+            if para.text.strip(): 
+                original_runs_text_and_format = []
+                for run in para.runs:
+                    original_runs_text_and_format.append({
+                        "text": run.text,
+                        "bold": run.font.bold,
+                        "italic": run.font.italic,
+                        "underline": run.font.underline,
+                        # Add other formatting as needed
+                    })
                 
+                full_para_text = "".join([r['text'] for r in original_runs_text_and_format])
                 redacted_para_text = redact_names_in_text(full_para_text, names_to_redact, placeholder)
 
                 if full_para_text != redacted_para_text:
@@ -52,47 +63,21 @@ def redact_docx(file_bytes, names_to_redact, placeholder="[REDACTED NAME]"):
                         p = para._p
                         p.remove(para.runs[0]._r)
                     
-                    # Add new run with redacted text, trying to preserve basic formatting
-                    # This is a simplified approach. Complex formatting might be lost.
-                    # A more robust way would be to iterate runs, redact, and reconstruct.
-                    # However, if a name spans multiple runs, it gets very complex.
-                    # For now, we'll replace the whole paragraph's text in a new run.
-                    # A slightly better approach for preserving some formatting:
                     new_run = para.add_run(redacted_para_text)
-                    if original_runs_text: # Try to apply style of first original run
-                        first_run_props = original_runs_text[0]
-                        # new_run.style = first_run_props[1] # Style application can be tricky
-                        new_run.bold = first_run_props[2]
-                        new_run.italic = first_run_props[3]
-                        new_run.underline = first_run_props[4]
-
-        # Redact in tables
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    for para in cell.paragraphs:
-                        if para.text.strip():
-                            original_runs_text = [(run.text, run.style.name if run.style else None, run.font.bold, run.font.italic, run.font.underline) for run in para.runs]
-                            full_para_text = "".join([r[0] for r in original_runs_text])
-                            redacted_para_text = redact_names_in_text(full_para_text, names_to_redact, placeholder)
-                            if full_para_text != redacted_para_text:
-                                for i in range(len(para.runs)):
-                                    p = para._p
-                                    p.remove(para.runs[0]._r)
-                                new_run = para.add_run(redacted_para_text)
-                                if original_runs_text:
-                                    first_run_props = original_runs_text[0]
-                                    new_run.bold = first_run_props[2]
-                                    new_run.italic = first_run_props[3]
-                                    new_run.underline = first_run_props[4]
-
-
+                    # Try to apply formatting from the first original run if available
+                    if original_runs_text_and_format:
+                        first_run_props = original_runs_text_and_format[0]
+                        if first_run_props["bold"] is not None: new_run.font.bold = first_run_props["bold"]
+                        if first_run_props["italic"] is not None: new_run.font.italic = first_run_props["italic"]
+                        if first_run_props["underline"] is not None: new_run.font.underline = first_run_props["underline"]
+        
         output_buffer = io.BytesIO()
         doc.save(output_buffer)
         output_buffer.seek(0)
         return output_buffer
     except Exception as e:
         st.error(f"Error processing DOCX: {e}")
+        st.error(traceback.format_exc())
         return None
 
 def redact_pdf(file_bytes, names_to_redact, placeholder="[REDACTED NAME]"):
@@ -108,22 +93,12 @@ def redact_pdf(file_bytes, names_to_redact, placeholder="[REDACTED NAME]"):
             for name in names_to_redact:
                 if not name.strip():
                     continue
-                # PyMuPDF's search is case-sensitive by default.
-                # To make it case-insensitive, we'd need to search for variations or extract text first.
-                # For simplicity here, we'll use its default. For true case-insensitivity,
-                # you might extract text, find positions, then redact, or use regex on extracted text.
-                # A common approach is to search for lowercase and uppercase versions if needed.
-                # Here, we rely on the regex pattern for the placeholder content.
                 
-                # Using text instances for redaction
-                text_instances = page.search_for(name, quads=True) # quads=True gives precise location
+                text_instances = page.search_for(name, quads=True) 
                 for inst in text_instances:
-                    # Add redaction annotation
-                    annot = page.add_redact_annot(inst, text=placeholder, fill=(0,0,0)) # fill=(0,0,0) for black
+                    annot = page.add_redact_annot(inst, text=placeholder, fill=(0,0,0)) 
             
-            # Apply all redactions on the page. This is crucial.
-            # It actually removes the text and replaces it.
-            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE) # Don't redact images
+            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE) 
 
         output_buffer = io.BytesIO()
         doc.save(output_buffer, garbage=4, deflate=True, clean=True)
@@ -132,11 +107,14 @@ def redact_pdf(file_bytes, names_to_redact, placeholder="[REDACTED NAME]"):
         return output_buffer
     except Exception as e:
         st.error(f"Error processing PDF: {e}")
+        st.error(traceback.format_exc())
         return None
 
+# MODIFIED redact_pptx function
 def redact_pptx(file_bytes, names_to_redact, placeholder="[REDACTED NAME]"):
     """
     Redacts names from the first two slides of a PPTX file.
+    Handles different color types (RGB vs. Scheme).
     """
     try:
         prs = Presentation(io.BytesIO(file_bytes))
@@ -149,17 +127,30 @@ def redact_pptx(file_bytes, names_to_redact, placeholder="[REDACTED NAME]"):
                     continue
                 text_frame = shape.text_frame
                 for paragraph in text_frame.paragraphs:
-                    # Store original runs and their text/formatting
                     original_runs_data = []
                     for run in paragraph.runs:
+                        font_color_type = None
+                        font_color_val = None
+                        
+                        # Check font.color.type before accessing specific color properties
+                        if hasattr(run.font.color, 'type'): # Defensive check
+                            if run.font.color.type == MSO_COLOR_TYPE.RGB:
+                                font_color_type = MSO_COLOR_TYPE.RGB
+                                font_color_val = run.font.color.rgb
+                            elif run.font.color.type == MSO_COLOR_TYPE.SCHEME:
+                                font_color_type = MSO_COLOR_TYPE.SCHEME
+                                font_color_val = run.font.color.theme_color # Store the theme_color enum
+                            # Add other MSO_COLOR_TYPE checks if needed (e.g., PRESET, CMYK)
+                        
                         original_runs_data.append({
                             "text": run.text,
                             "bold": run.font.bold,
                             "italic": run.font.italic,
-                            "underline": run.font.underline,
+                            "underline": run.font.underline, # Can be True, False, None, or MSO_TEXT_UNDERLINE_TYPE
                             "name": run.font.name,
                             "size": run.font.size,
-                            "color": run.font.color.rgb if run.font.color.rgb else None
+                            "color_type": font_color_type,
+                            "color_val": font_color_val
                         })
                     
                     full_para_text = "".join([r['text'] for r in original_runs_data])
@@ -171,28 +162,36 @@ def redact_pptx(file_bytes, names_to_redact, placeholder="[REDACTED NAME]"):
                         for idx in range(len(p.r_lst)):
                             p.remove(p.r_lst[0])
                         
-                        # Add new run with redacted text.
-                        # This simplified approach loses original run-level formatting if a name
-                        # is redacted. A more complex approach would involve reconstructing runs.
                         new_run = paragraph.add_run()
                         new_run.text = redacted_para_text
-                        # Try to apply formatting from the first original run if available
+                        
                         if original_runs_data:
                             first_run_format = original_runs_data[0]
-                            new_run.font.bold = first_run_format["bold"]
-                            new_run.font.italic = first_run_format["italic"]
-                            new_run.font.underline = first_run_format["underline"]
+                            if first_run_format["bold"] is not None: new_run.font.bold = first_run_format["bold"]
+                            if first_run_format["italic"] is not None: new_run.font.italic = first_run_format["italic"]
+                            if first_run_format["underline"] is not None: new_run.font.underline = first_run_format["underline"]
+                            
                             if first_run_format["name"]: new_run.font.name = first_run_format["name"]
                             if first_run_format["size"]: new_run.font.size = first_run_format["size"]
-                            # Color needs careful handling (RGBColor object)
-                            # if first_run_format["color"]: new_run.font.color.rgb = RGBColor(*first_run_format["color"])
-
+                            
+                            if first_run_format["color_type"] == MSO_COLOR_TYPE.RGB and first_run_format["color_val"]:
+                                new_run.font.color.rgb = RGBColor(first_run_format["color_val"][0], first_run_format["color_val"][1], first_run_format["color_val"][2])
+                            elif first_run_format["color_type"] == MSO_COLOR_TYPE.SCHEME and first_run_format["color_val"] is not None:
+                                try:
+                                    # first_run_format["color_val"] should be an MSO_THEME_COLOR_INDEX enum member
+                                    new_run.font.color.theme_color = first_run_format["color_val"]
+                                except Exception as e_theme:
+                                    # Log or silently pass if theme color application fails for some reason
+                                    # print(f"Note: Could not re-apply theme color: {e_theme}")
+                                    pass
+        
         output_buffer = io.BytesIO()
         prs.save(output_buffer)
         output_buffer.seek(0)
         return output_buffer
     except Exception as e:
         st.error(f"Error processing PPTX: {e}")
+        st.error(traceback.format_exc()) # Provides full traceback for debugging
         return None
 
 # --- Streamlit App ---
@@ -254,10 +253,9 @@ if uploaded_file is not None:
                     label=f"Download Redacted File ({output_file_name})",
                     data=redacted_file_bytes,
                     file_name=output_file_name,
-                    mime=uploaded_file.type  # Use the original mime type
+                    mime=uploaded_file.type
                 )
                 st.info("ℹ️ Always review the redacted document carefully to ensure all desired information has been properly redacted and no unintended information was removed or formatting excessively altered.")
-
 else:
     st.info("Upload a file to begin the redaction process.")
 
