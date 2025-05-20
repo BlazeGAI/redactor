@@ -129,7 +129,7 @@ def extract_initials_from_filename(filename_base):
 
 
 # --- Streamlit App ---
-st.set_page_config(layout="wide", page_title="TU File Redactor", page_icon="🐉")
+st.set_page_config(layout="wide", page_title="TU Name Redactor", page_icon="🐉")
 
 st.markdown("""
 <style>
@@ -145,7 +145,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📄 Word, PowerPoint & PDF Name Redactor 📛")
+st.title("🐉 TU Name Redactor")
 st.markdown("Welcome! This tool redacts names from documents. Configure settings, upload files, and download.")
 st.markdown("---")
 
