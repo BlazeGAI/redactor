@@ -8,7 +8,7 @@ import os
 import zipfile
 import re # For splitting filename into parts
 
-# --- Helper Functions (parse_names, redact_text_in_runs, redact_docx, redact_pptx, redact_pdf - UNCHANGED) ---
+
 def parse_names(names_string):
     if not names_string: return []
     names = [name.strip() for name in names_string.split(',')]
@@ -111,55 +111,25 @@ def redact_pdf(pdf_file_stream, names_to_redact, redaction_string): # redaction_
     doc.close()
     return None
 
-# --- New Helper Function to Extract Initials ---
 def extract_initials_from_filename(filename_base):
-    """
-    Attempts to extract initials from a filename base.
-    e.g., "John-Doe_Document" -> "JD"
-    "Activity 6 Kaitlynn Deardorff" -> "KD" (takes last two typically)
-    "singleword" -> "S"
-    """
-    # Remove common extra characters and split into potential name parts
-    # Split by space, hyphen, underscore. Filter out empty strings.
     parts = re.split(r'[\s_-]+', filename_base)
-    parts = [part for part in parts if part] # Remove empty strings from multiple delimiters
-
-    if not parts:
-        return ""
-
+    parts = [part for part in parts if part] 
+    if not parts: return ""
     initials = []
-    # Try to get initials from the first few words, or last few if it seems like a name
-    # This is heuristic. A more robust solution would need specific filename patterns.
-    
-    # Simple approach: take the first letter of each part, up to 2-3 initials
-    # and convert to uppercase.
     for part in parts:
-        if part and part[0].isalpha(): # Ensure it starts with a letter
+        if part and part[0].isalpha(): 
             initials.append(part[0].upper())
-    
-    if len(initials) > 2: # If many parts, e.g., "Very Long Document Title From User"
-                          # try to be smarter, maybe take first and last, or first two.
-                          # For now, let's cap at 2-3 or based on common name patterns.
-                          # A common pattern is Firstname Lastname.
-        if len(parts) >= 2:
-            # If "FirstName LastName Other stuff", try taking first letters of first two.
-            # If "Other Stuff FirstName LastName", try taking first letters of last two.
-            # Let's try a simple heuristic: take the first letter of the first two alphabetic parts.
-            alpha_initials = [p[0].upper() for p in parts if p and p[0].isalpha()]
-            if len(alpha_initials) >= 2:
-                return "".join(alpha_initials[:2])
-            elif alpha_initials:
-                return alpha_initials[0]
-            else: # no alphabetic parts
-                return "" 
-        else: # Only one part
-             return initials[0] if initials else ""
-    
-    return "".join(initials)
+    if len(initials) > 2: 
+        alpha_initials = [p[0].upper() for p in parts if p and p[0].isalpha()]
+        if len(alpha_initials) >= 2: return "".join(alpha_initials[:2])
+        elif alpha_initials: return alpha_initials[0]
+        else: return "" 
+    elif initials: return "".join(initials)
+    return ""
 
 
 # --- Streamlit App ---
-st.set_page_config(layout="wide", page_title="File Redactor")
+st.set_page_config(layout="wide", page_title="TU File Redactor", page_icon="🐉")
 
 st.markdown("""
 <style>
@@ -175,8 +145,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🐉 TU File Name Redactor")
-st.markdown("Welcome to the TU File Name Redactor! This tool helps you remove sensitive names from your documents. Upload your files, specify the names, and download the redacted versions.")
+st.title("📄 Word, PowerPoint & PDF Name Redactor 📛")
+st.markdown("Welcome! This tool redacts names from documents. Configure settings, upload files, and download.")
 st.markdown("---")
 
 with st.sidebar:
@@ -234,16 +204,16 @@ if st.button("Redact Files", type="primary", use_container_width=True, key="reda
                         
                         try:
                             with zipfile.ZipFile(uploaded_file_obj, 'r') as zip_ref:
-                                for member_name in zip_ref.namelist(): # member_name is full path in zip
-                                    member_base_name, member_ext_zip = os.path.splitext(os.path.basename(member_name)) # Get just the filename part
+                                for member_name_in_zip in zip_ref.namelist(): # member_name_in_zip is full path in zip
+                                    member_base_name, member_ext_zip = os.path.splitext(os.path.basename(member_name_in_zip)) 
                                     
-                                    if member_name.endswith('/') or member_name.startswith('__MACOSX'):
+                                    if member_name_in_zip.endswith('/') or member_name_in_zip.startswith('__MACOSX'):
                                         continue 
 
                                     if member_ext_zip.lower() in [".docx", ".pptx", ".pdf"]:
                                         members_found_for_processing_in_zip = True
-                                        st.caption(f"  Processing member: {member_name}")
-                                        member_bytes = zip_ref.read(member_name)
+                                        st.caption(f"  Processing member: {member_name_in_zip}")
+                                        member_bytes = zip_ref.read(member_name_in_zip)
                                         member_stream = io.BytesIO(member_bytes)
                                         
                                         redacted_member_content = None
@@ -251,15 +221,14 @@ if st.button("Redact Files", type="primary", use_container_width=True, key="reda
                                         elif member_ext_zip.lower() == ".pptx": redacted_member_content = redact_pptx(member_stream, names_list, redaction_text_docx_pptx)
                                         elif member_ext_zip.lower() == ".pdf": redacted_member_content = redact_pdf(member_stream, names_list, redaction_text_docx_pptx)
                                         
-                                        # Store original full member path, and the processed content
                                         if redacted_member_content:
-                                            processed_zip_members_data.append((member_name, redacted_member_content))
-                                            st.success(f"    ✅ Redacted: {member_name}")
+                                            processed_zip_members_data.append((member_name_in_zip, redacted_member_content))
+                                            st.success(f"    ✅ Redacted: {member_name_in_zip}")
                                             overall_docs_modified_count += 1
                                         else: 
                                             member_stream.seek(0)
-                                            processed_zip_members_data.append((member_name, member_stream))
-                                            st.info(f"    ℹ️ No redactions in: {member_name} (original included)")
+                                            processed_zip_members_data.append((member_name_in_zip, member_stream))
+                                            st.info(f"    ℹ️ No redactions in: {member_name_in_zip} (original included)")
                             
                             if members_found_for_processing_in_zip and processed_zip_members_data:
                                 output_zip_stream = io.BytesIO()
@@ -268,21 +237,18 @@ if st.button("Redact Files", type="primary", use_container_width=True, key="reda
                                     for m_full_path_in_zip, m_stream_content in processed_zip_members_data:
                                         m_stream_content.seek(0)
                                         
-                                        # Extract initials from the original member's base filename
-                                        original_member_base_name = os.path.splitext(os.path.basename(m_full_path_in_zip))[0]
-                                        extracted_initials = extract_initials_from_filename(original_member_base_name)
-                                        original_member_ext = os.path.splitext(m_full_path_in_zip)[1] # Get original extension
+                                        original_member_base_filename_only = os.path.splitext(os.path.basename(m_full_path_in_zip))[0]
+                                        extracted_initials = extract_initials_from_filename(original_member_base_filename_only)
+                                        original_member_ext_only = os.path.splitext(os.path.basename(m_full_path_in_zip))[1]
 
+                                        # Construct the new filename (base part only, no directory)
                                         if extracted_initials:
-                                            internal_filename_in_zip = f"{actual_output_zip_base_name}_{extracted_initials}_{file_counter_in_zip:04d}{original_member_ext}"
-                                        else: # Fallback if no initials could be extracted
-                                            internal_filename_in_zip = f"{actual_output_zip_base_name}_{file_counter_in_zip:04d}{original_member_ext}"
+                                            new_filename_for_zip_entry = f"{actual_output_zip_base_name}_{extracted_initials}_{file_counter_in_zip:04d}{original_member_ext_only}"
+                                        else: 
+                                            new_filename_for_zip_entry = f"{actual_output_zip_base_name}_{file_counter_in_zip:04d}{original_member_ext_only}"
                                         
-                                        # Preserve directory structure if m_full_path_in_zip contains it
-                                        if os.path.dirname(m_full_path_in_zip):
-                                            internal_filename_in_zip = os.path.join(os.path.dirname(m_full_path_in_zip), os.path.basename(internal_filename_in_zip))
-                                        
-                                        new_zip_archive.writestr(internal_filename_in_zip, m_stream_content.read())
+                                        # Write to ZIP at the top level using only the new filename
+                                        new_zip_archive.writestr(new_filename_for_zip_entry, m_stream_content.read())
                                         file_counter_in_zip +=1
                                 
                                 output_zip_stream.seek(0)
@@ -291,7 +257,7 @@ if st.button("Redact Files", type="primary", use_container_width=True, key="reda
                                     (original_input_name, display_zip_name, output_zip_stream, ".zip")
                                 )
                                 st.success(f"📦 Created new ZIP: **{display_zip_name}**.")
-                                st.caption(f"   Files inside '{display_zip_name}' are renamed using base '{actual_output_zip_base_name}', auto-extracted initials (if any), and a number.")
+                                st.caption(f"   Files inside '{display_zip_name}' are at the top level, renamed using base '{actual_output_zip_base_name}', auto-extracted initials (if any), and a number.")
 
                             elif not members_found_for_processing_in_zip:
                                 st.info(f"ℹ️ No supported files (.docx, .pptx, .pdf) found in ZIP: **{original_input_name}** to process.")
@@ -353,16 +319,16 @@ with st.expander("📜 Instructions & Notes", expanded=False):
             *   Set custom **Redaction text** for DOCX/PPTX.
             *   For **ZIP Output Options** (only for .zip uploads):
                 *   **Custom output ZIP name base:** Define the base name for the output ZIP file. (e.g., `MyProject` results in `MyProject.zip`). Defaults to `redacted_[original_zip_name]`.
-                *   **Initials for renaming files *inside* the ZIP** are now automatically extracted from the original filenames of the member files (e.g., a file named `John-Doe-Report.docx` might contribute `JD` as initials).
+                *   **Initials for renaming files *inside* the ZIP** are automatically extracted from the original filenames of the member files.
         2.  **Upload Files (Main Area):** Select .docx, .pptx, .pdf, or .zip files.
         3.  **Redact:** Click "Redact Files".
         4.  **Download:**
             *   Processed individual files are available.
-            *   For uploaded ZIPs, a new ZIP archive is created. Files inside this new ZIP will be named: `[OutputZipNameBase]_[ExtractedInitials]_[Number].ext`. If initials cannot be extracted, that part is omitted.
+            *   For uploaded ZIPs, a new ZIP archive is created. All processed files from the original ZIP will be placed at the **top level** of this new ZIP, renamed as: `[OutputZipNameBase]_[ExtractedInitials]_[Number].ext`. If initials cannot be extracted, that part is omitted.
 
         #### Important Notes:
         *   **PDFs:** Names are blacked out.
-        *   **ZIPs:** Output is a new ZIP. Auto-extracted initials depend on the filename structure of the original files within the ZIP. Directory structure within the original ZIP is preserved in the output ZIP.
+        *   **ZIPs:** Output is a new ZIP with all processed files at the root level.
         *   **Complex Docs/Scanned PDFs:** Redaction might be incomplete.
         *   **Backup:** Always keep originals!
         """)
